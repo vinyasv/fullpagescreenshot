@@ -15,7 +15,7 @@ In `chrome://extensions`, remove any installation that points to the project roo
 
 ## Permissions and privacy
 
-`activeTab` and `scripting` let Fullpage Screenshot scroll the tab you choose; `storage` and `unlimitedStorage` hold local screenshot data while the editor is open. No screenshots or page data are sent to a server. The extension does not request `debugger` or persistent website access. See [PRIVACY.md](PRIVACY.md).
+`activeTab` and `scripting` let Fullpage Screenshot scroll the tab you choose; `storage` and `unlimitedStorage` hold local screenshot data until you discard it or uninstall the extension. Successful recapture deletes the replaced capture. Redactions are always opaque in previews and exports; original screenshots remain locally until deleted. No screenshots or page data are sent to a server. The extension does not request `debugger` or persistent website access. See [PRIVACY.md](PRIVACY.md).
 
 ## Known limitations
 
@@ -28,4 +28,4 @@ In `chrome://extensions`, remove any installation that points to the project roo
 
 ## Development checks
 
-`npm test` runs tile-overlap tests; `npm run build` type-checks and packages the extension. For manual validation, use `fixtures/capture-cases.html` through a local HTTP server and check the screenshot's bottom marker, sticky header, export dimensions, crop/redaction, PDF page count, and restored source scroll position.
+`npm test` checks geometry, colors, viewport layout, capture lifecycle, message validation, image limits, redaction opacity, and bounded scrolling; `npm run build` type-checks and packages the extension. For manual validation, use `fixtures/capture-cases.html` through a local HTTP server and check the screenshot's bottom marker, sticky header, export dimensions, crop/redaction, PDF page count, and restored source scroll position. Also switch tabs or navigate during capture, test a high-DPI display, and confirm recapture and Discard cleanup in extension storage.

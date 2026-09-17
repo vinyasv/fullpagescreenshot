@@ -38,7 +38,7 @@ export function inspectPage() {
       }
     }
   }
-  return { width, height, viewportWidth, viewportHeight, inner };
+  return { width, height, viewportWidth, viewportHeight, inner, pixelRatio: window.devicePixelRatio };
 }
 
 export function startScroll(measured: ReturnType<typeof inspectPage>): import('./types').ScrollPlan {
@@ -68,7 +68,10 @@ export function startScroll(measured: ReturnType<typeof inspectPage>): import('.
   const last = Math.max(0, Math.ceil(content - viewport));
   const stride = Math.max(1, Math.floor(viewport - Math.min(120, viewport / 5)));
   const positions: number[] = [0];
-  for (let pos = stride; pos < last; pos += stride) positions.push(pos);
+  for (let pos = stride; pos < last; pos += stride) {
+    if (positions.length >= 300) throw new Error('This page is too long to capture safely.');
+    positions.push(pos);
+  }
   if (last > 0) positions.push(last);
   // Limit infinite-scroll and pathological documents to a finite capture.
   if (positions.length > 300) throw new Error('This page is too long to capture safely.');

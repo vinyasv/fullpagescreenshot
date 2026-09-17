@@ -24,7 +24,9 @@ export interface CaptureRecord {
   createdAt: number;
 }
 
-export type CaptureMessage =
+export type CaptureRequest =
   | { type: 'start' | 'status' | 'cancel'; sourceTabId: number }
-  | { type: 'retry'; sourceTabId: number; editorTabId: number }
+  | { type: 'retry'; sourceTabId: number; editorTabId: number };
+
+export type CaptureMessage = CaptureRequest
   | { type: 'progress'; sourceTabId: number; percent: number; message: string };

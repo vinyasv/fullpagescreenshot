@@ -2,6 +2,7 @@ import Konva from 'konva';
 import { jsPDF } from 'jspdf';
 import type { CaptureRecord } from './types';
 import { uncoveredSlice } from './geometry';
+import { annotationOpacity, assertImageSize, MAX_TILES } from './capture-safety';
 import { clamp, hexToRgb, hsvToRgb, rgbToHex, rgbToHsv, type HSV } from './color';
 import { visibleViewport, viewportLayout, type ViewportBox } from './editor-viewport';
 import '@fontsource/inter/latin-400.css';
@@ -200,6 +201,7 @@ function pickerValue(color: string, opacity: number, continuous = false) {
   const id = pickerId;
   color = color.toLowerCase();
   const edit = edits.find(item => item.id === id);
+  if (edit) opacity = annotationOpacity(edit.type, opacity);
   if (!edit || edit.type === 'crop' || (edit.color === color && edit.opacity === opacity)) return;
   if (continuous) {
     if (!pickerGestureActive) { undoStack.push(structuredClone(edits)); redoStack = []; pickerGestureActive = true; }
@@ -229,10 +231,12 @@ function renderPickerState() {
   picker.querySelector<HTMLElement>('.color-field')!.setAttribute('aria-valuetext', `Saturation ${Math.round(hsv.s * 100)}%, brightness ${Math.round(hsv.v * 100)}%`);
   picker.querySelector<HTMLInputElement>('#picker-hue')!.value = String(Math.round(pickerHue));
   picker.querySelector<HTMLInputElement>('#picker-alpha')!.value = String(Math.round(edit.opacity * 100));
+  picker.querySelector<HTMLInputElement>('#picker-alpha')!.disabled = edit.type === 'redact';
   picker.querySelectorAll<HTMLInputElement>('[data-rgb]').forEach(input => { if (document.activeElement !== input) input.value = String(rgb[input.dataset.rgb as keyof typeof rgb]); });
   const hex = picker.querySelector<HTMLInputElement>('#picker-hex');
   if (hex && document.activeElement !== hex) hex.value = edit.color.slice(1).toUpperCase();
   const percent = picker.querySelector<HTMLInputElement>('#picker-percent');
+  if (percent) percent.disabled = edit.type === 'redact';
   if (percent && document.activeElement !== percent) percent.value = String(Math.round(edit.opacity * 100));
   picker.querySelector<HTMLElement>('.saved-colors')!.innerHTML = savedColors.map((item, index) => `<button class="saved-swatch ${item.color === edit.color && item.opacity === edit.opacity ? 'current' : ''}" data-saved="${index}" style="--swatch:${item.color};--swatch-opacity:${item.opacity}" aria-label="Use saved color ${item.color}, ${Math.round(item.opacity * 100)}% opacity"></button>`).join('');
 }
@@ -367,7 +371,7 @@ function drawEdits() {
     else if (edit.type === 'circle') node = new Konva.Ellipse({ x: edit.box.x + edit.box.width / 2, y: edit.box.y + edit.box.height / 2, radiusX: edit.box.width / 2, radiusY: edit.box.height / 2, stroke: edit.color, strokeWidth: edit.strokeWidth, fill: edit.filled ? edit.color : undefined, draggable: true });
     else if (edit.type === 'redact') node = new Konva.Rect({ ...edit.box, fill: edit.color, draggable: true });
     else node = new Konva.Text({ x: edit.x, y: edit.y, width: edit.width, text: edit.text, fontSize: edit.fontSize, fontFamily: edit.fontFamily || 'Arial', fontStyle: edit.bold ? 'bold' : 'normal', fill: edit.color, draggable: true });
-    node.opacity(edit.opacity);
+    node.opacity(annotationOpacity(edit.type, edit.opacity));
     node.name(edit.id);
     node.on('mousedown touchstart', event => { event.cancelBubble = true; selectedId = edit.id; transformer.nodes(edit.type === 'arrow' ? [] : [node]); transformer.enabledAnchors(edit.type === 'text' ? ['middle-left', 'middle-right'] : ['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']); renderInspector(); renderLayers(); });
     node.on('click tap', event => { event.cancelBubble = true; if (edit.type === 'arrow') select(edit.id); });
@@ -559,11 +563,22 @@ function image(url: string): Promise<HTMLImageElement> {
 }
 
 async function assemble(capture: CaptureRecord): Promise<HTMLImageElement> {
-  const keys = Array.from({ length: capture.count }, (_, i) => `tile:${capture.id}:${i}`);
-  const values = await chrome.storage.local.get(keys);
-  if (keys.some(k => typeof values[k] !== 'string')) throw new Error('Capture data is missing. Retry the screenshot.');
-  const first = await image(values[keys[0]] as string);
+  assertImageSize(capture.width, capture.height);
+  if (!Number.isSafeInteger(capture.count) || capture.count < 1 || capture.count > MAX_TILES
+    || !Array.isArray(capture.positions) || capture.positions.length !== capture.count
+    || !capture.positions.every(position => Number.isFinite(position) && position >= 0)) {
+    throw new Error('Invalid capture data. Retry the screenshot.');
+  }
+  const loadTile = async (index: number) => {
+    const key = `tile:${capture.id}:${index}`;
+    const values = await chrome.storage.local.get(key);
+    const value = values[key];
+    if (typeof value !== 'string' || !value.startsWith('data:image/png;base64,')) throw new Error('Capture data is missing or invalid. Retry the screenshot.');
+    return image(value);
+  };
+  const first = await loadTile(0);
   const ratio = first.naturalWidth / capture.viewportWidth;
+  assertImageSize(Math.ceil(capture.width * ratio), Math.ceil(capture.height * ratio));
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(capture.width * ratio);
   canvas.height = Math.ceil(capture.height * ratio);
@@ -573,7 +588,8 @@ async function assemble(capture: CaptureRecord): Promise<HTMLImageElement> {
   const inner = capture.inner;
   let covered = inner ? inner.height : capture.viewportHeight;
   for (let i = 1; i < capture.count; i++) {
-    const tile = await image(values[keys[i]] as string);
+    const tile = await loadTile(i);
+    if (tile.naturalWidth !== first.naturalWidth || tile.naturalHeight !== first.naturalHeight) throw new Error('The viewport changed during capture. Retry the screenshot.');
     const position = capture.positions[i];
     const extent = inner ? inner.height : capture.viewportHeight;
     const slice = uncoveredSlice(covered, position, extent, inner ? inner.scrollHeight : capture.height);
@@ -595,6 +611,7 @@ async function assemble(capture: CaptureRecord): Promise<HTMLImageElement> {
 }
 
 function exportCanvas(region: Box): HTMLCanvasElement {
+  assertImageSize(Math.ceil(region.width / scale), Math.ceil(region.height / scale));
   overlay.visible(false);
   try { return stage.toCanvas({ x: region.x, y: region.y, width: region.width, height: region.height, pixelRatio: 1 / scale }); }
   finally { overlay.visible(true); }
@@ -641,7 +658,7 @@ async function load() {
   if (!id) throw new Error('No capture was selected.');
   const value = await chrome.storage.local.get(`capture:${id}`);
   record = value[`capture:${id}`] as CaptureRecord;
-  if (!record) throw new Error('This capture is no longer available.');
+  if (!record || record.id !== id) throw new Error('This capture is no longer available.');
   baseImage = await assemble(record);
   await Promise.all([document.fonts.load('400 16px Inter'), document.fonts.load('700 16px Inter')]);
   const downloadIcon = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 1.5v12m0 0 4.5-4.5M10 13.5 5.5 9M2 18h16" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -679,16 +696,24 @@ async function load() {
   el<HTMLButtonElement>('#retry').onclick = async () => {
     if (busy) return;
     busy = true; status('Returning to the source page for scrolling capture…');
-    const current = await chrome.tabs.getCurrent();
-    if (!current?.id) { busy = false; status('Could not find this editor tab.'); return; }
-    await chrome.runtime.sendMessage({ type: 'retry', sourceTabId: record.sourceTabId, editorTabId: current.id });
+    try {
+      const current = await chrome.tabs.getCurrent();
+      if (!current?.id) throw new Error('Could not find this editor tab.');
+      const response = await chrome.runtime.sendMessage({ type: 'retry', sourceTabId: record.sourceTabId, editorTabId: current.id });
+      if (!response?.ok) throw new Error(response?.message || 'Capture could not start.');
+    } catch (error) {
+      busy = false;
+      status(error instanceof Error ? error.message : 'Capture could not start.');
+    }
   };
   el<HTMLButtonElement>('#discard').onclick = async () => {
+    if (busy) return;
     const keys = [`capture:${record.id}`, ...Array.from({ length: record.count }, (_, i) => `tile:${record.id}:${i}`)];
-    await chrome.storage.local.remove(keys);
-    window.close();
+    try { await chrome.storage.local.remove(keys); window.close(); }
+    catch { status('Could not delete the capture. Please try Discard again.'); }
   };
   window.addEventListener('keydown', event => {
+    if (busy) return;
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) return;
     if (event.target instanceof HTMLElement && event.target.closest('button')) return;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
@@ -789,9 +814,9 @@ function togglePanel(side: 'layers' | 'properties', collapse: boolean) {
 async function runExport(operation: () => Promise<void>) {
   if (busy) return;
   busy = true;
-  try { await operation(); status('Export ready.'); }
+  try { finishTextEditor?.(true); app.inert = true; await operation(); status('Export ready.'); }
   catch (error) { status(error instanceof Error ? error.message : 'Export failed.'); }
-  finally { busy = false; }
+  finally { app.inert = false; busy = false; }
 }
 
 chrome.runtime.onMessage.addListener(message => {
