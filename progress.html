@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fullpage Screenshot · Capture</title>
+  </head>
+  <body>
+    <main class="progress">
+      <div class="progress-top"><span class="progress-mark">◫</span><strong>Fullpage Screenshot</strong></div>
+      <p id="message">Starting capture…</p>
+      <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="bar"></div></div>
+      <div class="progress-bottom"><span id="percent">0%</span><button id="cancel">Cancel</button></div>
+    </main>
+    <script type="module" src="/src/progress.ts"></script>
+  </body>
+</html>

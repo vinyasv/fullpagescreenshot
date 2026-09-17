@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pagecraft inner scroller fixture</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; overflow: hidden; font: 20px system-ui; }
+  header, footer { height: 60px; padding: 16px; background: #252525; color: white; }
+  main { height: calc(100vh - 120px); overflow-y: auto; background: #eee9df; }
+  section { height: 550px; padding: 36px; border-bottom: 5px solid #e56142; }
+</style></head><body><header>Fixed app shell header</header><main id="scroll"><section>Inner section one</section><section>Inner section two</section><section>Inner section three</section><section>INNER END MARKER</section></main><footer>Fixed app shell footer</footer></body></html>

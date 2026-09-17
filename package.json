@@ -1,0 +1,24 @@
+{
+  "name": "fullpage-screenshot",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && node scripts/verify-build.mjs",
+    "package": "npm run build && rm -f pagecraft-extension.zip fullpage-screenshot-extension.zip && cd dist && zip -q -r ../fullpage-screenshot-extension.zip .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "jspdf": "^4.2.1",
+    "konva": "^10.0.6"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.34",
+    "@types/chrome": "^0.3.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.0",
+    "vitest": "^5.0.1"
+  }
+}
