@@ -104,13 +104,6 @@ export function moveScroll(position: number, first: boolean): number {
   return window.scrollY;
 }
 
-export function readScrollExtent(): number {
-  const scroller = window.__pagecraftState?.scroller;
-  if (scroller) return scroller.scrollHeight;
-  const root = document.scrollingElement || document.documentElement;
-  return Math.max(root.scrollHeight, document.body?.scrollHeight || 0, window.innerHeight);
-}
-
 export function finishScroll() {
   const state = window.__pagecraftState;
   if (!state) return;

@@ -1,9 +1,10 @@
-import { finishScroll, inspectPage, moveScroll, readScrollExtent, startScroll } from './page';
+import { finishScroll, inspectPage, moveScroll, startScroll } from './page';
 import { reachedEnd } from './geometry';
 import type { CaptureRecord, ScrollPlan } from './types';
-import { assertImageSize, isCaptureRequest } from './capture-safety';
+import { imageSegmentHeights, isCaptureRequest } from './capture-safety';
+import { deleteCapture, readCaptureRecord, saveCaptureRecord, saveCaptureTile } from './capture-store';
 
-type Job = { canceled: boolean; sourceTabId: number; percent: number; windowId?: number; documentId?: string };
+type Job = { canceled: boolean; stopping: boolean; sourceTabId: number; percent: number; windowId?: number; documentId?: string };
 const jobs = new Map<number, Job>();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -47,8 +48,9 @@ async function scrollCapture(tabId: number, id: string, job: Job, measured: Retu
   const actualPositions: number[] = [];
   try {
     plan = await runInPage(tabId, startScroll, [measured]);
-    assertImageSize(plan.width * measured.pixelRatio, plan.height * measured.pixelRatio);
+    imageSegmentHeights(plan.width * measured.pixelRatio, plan.height * measured.pixelRatio);
     for (let index = 0; index < plan.positions.length; index++) {
+      if (job.stopping && count > 0) break;
       const position = plan.positions[index];
       await assertSourceActive(job);
       const actual = await runInPage(tabId, moveScroll, [position, index === 0]);
@@ -59,34 +61,23 @@ async function scrollCapture(tabId: number, id: string, job: Job, measured: Retu
       const dataUrl = await chrome.tabs.captureVisibleTab(job.windowId!, { format: 'png' });
       // captureVisibleTab targets a window's active tab, not a particular tab ID.
       await assertSourceActive(job);
-      await chrome.storage.local.set({ [`tile:${id}:${index}`]: dataUrl });
+      await saveCaptureTile(id, index, dataUrl);
       count++;
-      if (index === plan.positions.length - 1) {
-        const extent = await runInPage(tabId, readScrollExtent, []);
-        const previous = plan.inner ? plan.inner.scrollHeight : plan.height;
-        if (extent > previous + 8) {
-          const viewport = plan.inner ? plan.inner.height : plan.viewportHeight;
-          const stride = Math.max(1, Math.floor(viewport - Math.min(120, viewport / 5)));
-          const last = Math.max(0, Math.ceil(extent - viewport));
-          const oldLast = plan.positions.at(-1)!;
-          for (let pos = oldLast + stride; pos < last; pos += stride) {
-            if (plan.positions.length >= 300) throw new Error('The page keeps growing during capture.');
-            plan.positions.push(pos);
-          }
-          if (last > oldLast) plan.positions.push(last);
-          if (plan.positions.length > 300) throw new Error('The page keeps growing during capture.');
-          if (plan.inner) {
-            plan.height += extent - plan.inner.scrollHeight;
-            plan.inner.scrollHeight = extent;
-          } else plan.height = extent;
-          assertImageSize(plan.width * measured.pixelRatio, plan.height * measured.pixelRatio);
-        }
-      }
       await progress(job, Math.round(count / plan.positions.length * 100), `Scrolling page · ${count} of ${plan.positions.length}`);
+      if (job.stopping) break;
     }
     const viewport = plan.inner ? plan.inner.height : plan.viewportHeight;
     const extent = plan.inner ? plan.inner.scrollHeight : plan.height;
-    if (!reachedEnd(actualPositions.at(-1)!, viewport, extent)) throw new Error('The capture did not reach the bottom of the page.');
+    if (job.stopping) {
+      const capturedExtent = Math.min(extent, Math.ceil(actualPositions.at(-1)! + viewport));
+      if (plan.inner) {
+        plan.height -= plan.inner.scrollHeight - capturedExtent;
+        plan.inner.scrollHeight = capturedExtent;
+      } else plan.height = capturedExtent;
+      plan.positions = plan.positions.slice(0, count);
+    } else if (!reachedEnd(actualPositions.at(-1)!, viewport, extent)) {
+      throw new Error('The capture did not reach the bottom of the page.');
+    }
     return { plan, count, actualPositions };
   } catch (error) {
     await removeTiles(id, count);
@@ -97,17 +88,16 @@ async function scrollCapture(tabId: number, id: string, job: Job, measured: Retu
 }
 
 async function removeTiles(id: string, count: number) {
-  if (count) await chrome.storage.local.remove(Array.from({ length: count }, (_, i) => `tile:${id}:${i}`));
+  if (count) await deleteCapture(id, count);
 }
 
 async function capture(sourceTabId: number, editorTabId?: number, previousId?: string | null) {
   if (jobs.has(sourceTabId)) return;
-  const job: Job = { canceled: false, sourceTabId, percent: 0 };
+  const job: Job = { canceled: false, stopping: false, sourceTabId, percent: 0 };
   jobs.set(sourceTabId, job);
   const id = crypto.randomUUID();
   let stored = 0;
   try {
-    await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     await chrome.action.setBadgeBackgroundColor({ tabId: sourceTabId, color: '#302e29' });
     await chrome.action.setBadgeText({ tabId: sourceTabId, text: '…' });
     const tab = await chrome.tabs.get(sourceTabId);
@@ -120,33 +110,31 @@ async function capture(sourceTabId: number, editorTabId?: number, previousId?: s
     stored = result.count;
     assertActive(job);
     const record: CaptureRecord = {
-      id, sourceTabId, title: tab.title || 'Untitled page', mode: 'scroll', width: result.plan.width, height: result.plan.height,
+      id, sourceTabId, mode: 'scroll', width: result.plan.width, height: result.plan.height,
       viewportWidth: measured.viewportWidth, viewportHeight: measured.viewportHeight,
-      positions: result.actualPositions, inner: result.plan.inner, count: stored, createdAt: Date.now(),
+      positions: result.actualPositions, inner: result.plan.inner, count: stored,
     };
-    await chrome.storage.local.set({ [`capture:${id}`]: record });
+    await saveCaptureRecord(record);
     await progress(job, 100, 'Opening editor…');
+    assertActive(job);
     const url = chrome.runtime.getURL(`editor.html?id=${encodeURIComponent(id)}`);
     if (editorTabId) await chrome.tabs.update(editorTabId, { url, active: true });
     else await chrome.tabs.create({ url, active: true });
     // Retire the replaced capture only after its replacement opened successfully.
     if (previousId && previousId !== id) {
       try {
-        const key = `capture:${previousId}`;
-        const previous = (await chrome.storage.local.get(key))[key] as CaptureRecord | undefined;
+        const previous = await readCaptureRecord(previousId);
         if (previous?.sourceTabId === sourceTabId && Number.isSafeInteger(previous.count) && previous.count >= 0 && previous.count <= 300) {
-          await chrome.storage.local.remove([key, ...Array.from({ length: previous.count }, (_, i) => `tile:${previousId}:${i}`)]);
+          await deleteCapture(previousId, previous.count);
         }
       } catch (error) { console.error('Could not remove the replaced capture:', error); }
     }
   } catch (error) {
-    await chrome.storage.local.remove([`capture:${id}`, ...Array.from({ length: stored }, (_, i) => `tile:${id}:${i}`)]).catch(console.error);
+    await deleteCapture(id, stored).catch(console.error);
     const message = error instanceof Error ? error.message : String(error);
     console.error('Capture failed:', message);
-    await chrome.action.setBadgeText({ tabId: sourceTabId, text: 'ERR' }).catch(() => {});
-    chrome.runtime.sendMessage({ type: 'progress', sourceTabId, percent: job.percent, message }).catch(() => {});
-    if (editorTabId) chrome.runtime.sendMessage({ type: 'capture-error', sourceTabId, message }).catch(() => {});
-    else await chrome.tabs.create({ url: chrome.runtime.getURL(`editor.html?error=${encodeURIComponent(message)}`) }).catch(() => {});
+    await chrome.action.setBadgeText({ tabId: sourceTabId, text: job.canceled ? '' : 'ERR' }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'capture-error', sourceTabId, message, canceled: job.canceled }).catch(() => {});
   } finally {
     jobs.delete(sourceTabId);
     setTimeout(() => chrome.action.setBadgeText({ tabId: sourceTabId, text: '' }).catch(() => {}), 5000);
@@ -171,6 +159,11 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
   if (message.type === 'cancel') {
     const job = jobs.get(message.sourceTabId);
     if (job) job.canceled = true;
+    sendResponse({ ok: !!job });
+  }
+  if (message.type === 'stop') {
+    const job = jobs.get(message.sourceTabId);
+    if (job) job.stopping = true;
     sendResponse({ ok: !!job });
   }
   if (message.type === 'retry') {

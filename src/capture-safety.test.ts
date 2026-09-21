@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { annotationOpacity, assertImageSize, isCaptureRequest } from './capture-safety';
+import { annotationOpacity, assertImageSize, imageSegmentHeights, isCaptureRequest } from './capture-safety';
 
 describe('capture limits', () => {
   it('accepts the image boundary and rejects oversized high-DPI images', () => {
@@ -10,6 +10,21 @@ describe('capture limits', () => {
   it.each([NaN, Infinity, 0, -1])('rejects invalid dimensions: %s', value => {
     expect(() => assertImageSize(value, 100)).toThrow();
     expect(() => assertImageSize(100, value)).toThrow();
+  });
+});
+
+describe('image segmentation', () => {
+  it('keeps ordinary captures in one image', () => {
+    expect(imageSegmentHeights(4000, 20_000)).toEqual([20_000]);
+  });
+
+  it('splits a long capture into the minimum safe number of images', () => {
+    expect(imageSegmentHeights(4000, 35_000)).toEqual([30_000, 5_000]);
+    expect(imageSegmentHeights(8000, 31_000)).toEqual([15_000, 15_000, 1_000]);
+  });
+
+  it('still rejects an image wider than the browser-safe edge', () => {
+    expect(() => imageSegmentHeights(30_001, 1000)).toThrow('too wide');
   });
 });
 

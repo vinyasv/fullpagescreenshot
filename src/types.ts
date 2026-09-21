@@ -12,7 +12,6 @@ export interface ScrollPlan {
 export interface CaptureRecord {
   id: string;
   sourceTabId: number;
-  title: string;
   mode: CaptureMode;
   width: number;
   height: number;
@@ -21,11 +20,10 @@ export interface CaptureRecord {
   positions: number[];
   inner?: ScrollPlan['inner'];
   count: number;
-  createdAt: number;
 }
 
 export type CaptureRequest =
-  | { type: 'start' | 'status' | 'cancel'; sourceTabId: number }
+  | { type: 'start' | 'status' | 'stop' | 'cancel'; sourceTabId: number }
   | { type: 'retry'; sourceTabId: number; editorTabId: number };
 
 export type CaptureMessage = CaptureRequest

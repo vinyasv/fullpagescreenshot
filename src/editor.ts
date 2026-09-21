@@ -1,8 +1,9 @@
 import Konva from 'konva';
 import { jsPDF } from 'jspdf';
 import type { CaptureRecord } from './types';
+import { deleteCapture, readCaptureRecord, readCaptureTile } from './capture-store';
 import { uncoveredSlice } from './geometry';
-import { annotationOpacity, assertImageSize, MAX_TILES } from './capture-safety';
+import { annotationOpacity, assertImageSize, imageSegmentHeights, MAX_TILES } from './capture-safety';
 import { clamp, hexToRgb, hsvToRgb, rgbToHex, rgbToHsv, type HSV } from './color';
 import { visibleViewport, viewportLayout, type ViewportBox } from './editor-viewport';
 import '@fontsource/inter/latin-400.css';
@@ -49,7 +50,7 @@ let record: CaptureRecord;
 let stage: Konva.Stage;
 let art: Konva.Layer;
 let overlay: Konva.Layer;
-let baseImage: HTMLImageElement;
+let baseImages: HTMLCanvasElement[];
 let scale = 1;
 let tool: Tool = 'select';
 let edits: Edit[] = [];
@@ -62,7 +63,7 @@ let start = { x: 0, y: 0 };
 let penPoints: number[] = [];
 let busy = false;
 let transformer: Konva.Transformer;
-let baseNode: Konva.Image;
+let baseNodes: Konva.Image[] = [];
 let viewZoom = 1;
 let zoomIsFit = true;
 let draggedLayerId: string | null = null;
@@ -357,8 +358,14 @@ function dimOutside(box: Box) {
 function drawEdits() {
   art.destroyChildren();
   art.listening(selectedEdit()?.type !== 'crop');
-  baseNode = new Konva.Image({ image: baseImage, width: stage.width(), height: stage.height() });
-  art.add(baseNode);
+  let imageY = 0;
+  baseNodes = baseImages.map(image => {
+    const height = image.height * scale;
+    const node = new Konva.Image({ image, x: 0, y: imageY, width: stage.width(), height });
+    imageY += height;
+    art.add(node);
+    return node;
+  });
   overlay.destroyChildren();
   for (const edit of edits) {
     if (edit.type === 'crop') continue;
@@ -513,7 +520,7 @@ function beginTextEdit(id: string, selectAll = false) {
 function bindStage() {
   stage.on('mousedown touchstart', event => {
     if (busy) return;
-    if (event.target !== baseNode) return;
+    if (!baseNodes.includes(event.target as Konva.Image)) return;
     if (tool === 'select' || tool === 'crop' || tool === 'text') { select(null); return; }
     start = point();
     if (tool === 'pen') penPoints = [start.x, start.y];
@@ -562,29 +569,44 @@ function image(url: string): Promise<HTMLImageElement> {
   });
 }
 
-async function assemble(capture: CaptureRecord): Promise<HTMLImageElement> {
-  assertImageSize(capture.width, capture.height);
+async function assemble(capture: CaptureRecord): Promise<HTMLCanvasElement[]> {
   if (!Number.isSafeInteger(capture.count) || capture.count < 1 || capture.count > MAX_TILES
     || !Array.isArray(capture.positions) || capture.positions.length !== capture.count
     || !capture.positions.every(position => Number.isFinite(position) && position >= 0)) {
     throw new Error('Invalid capture data. Retry the screenshot.');
   }
   const loadTile = async (index: number) => {
-    const key = `tile:${capture.id}:${index}`;
-    const values = await chrome.storage.local.get(key);
-    const value = values[key];
+    const value = await readCaptureTile(capture.id, index);
     if (typeof value !== 'string' || !value.startsWith('data:image/png;base64,')) throw new Error('Capture data is missing or invalid. Retry the screenshot.');
     return image(value);
   };
   const first = await loadTile(0);
   const ratio = first.naturalWidth / capture.viewportWidth;
-  assertImageSize(Math.ceil(capture.width * ratio), Math.ceil(capture.height * ratio));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.ceil(capture.width * ratio);
-  canvas.height = Math.ceil(capture.height * ratio);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Chrome could not allocate an image canvas.');
-  ctx.drawImage(first, 0, 0);
+  const pixelWidth = Math.ceil(capture.width * ratio);
+  const pixelHeight = Math.ceil(capture.height * ratio);
+  const canvases = imageSegmentHeights(pixelWidth, pixelHeight).map(height => {
+    const canvas = document.createElement('canvas');
+    canvas.width = pixelWidth;
+    canvas.height = height;
+    if (!canvas.getContext('2d')) throw new Error('Chrome could not allocate an image canvas.');
+    return canvas;
+  });
+  const draw = (source: CanvasImageSource, sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, dw: number, dh: number) => {
+    let chunkTop = 0;
+    for (const canvas of canvases) {
+      const chunkBottom = chunkTop + canvas.height;
+      const top = Math.max(dy, chunkTop);
+      const bottom = Math.min(dy + dh, chunkBottom);
+      if (bottom > top) {
+        const sourceTop = sy + (top - dy) / dh * sh;
+        const sourceHeight = (bottom - top) / dh * sh;
+        canvas.getContext('2d')!.drawImage(source, sx, sourceTop, sw, sourceHeight, dx, top - chunkTop, dw, bottom - top);
+      }
+      chunkTop = chunkBottom;
+      if (chunkTop >= dy + dh) break;
+    }
+  };
+  draw(first, 0, 0, first.width, first.height, 0, 0, first.width, first.height);
   const inner = capture.inner;
   let covered = inner ? inner.height : capture.viewportHeight;
   for (let i = 1; i < capture.count; i++) {
@@ -597,17 +619,17 @@ async function assemble(capture: CaptureRecord): Promise<HTMLImageElement> {
       const x = inner ? inner.left : 0;
       const y = inner ? inner.top : 0;
       const width = inner ? inner.width : capture.width;
-      ctx.drawImage(tile, x * ratio, (y + slice.sourceOffset) * ratio, width * ratio, slice.length * ratio,
+      draw(tile, x * ratio, (y + slice.sourceOffset) * ratio, width * ratio, slice.length * ratio,
         x * ratio, (y + slice.destination) * ratio, width * ratio, slice.length * ratio);
       covered = slice.covered;
     }
   }
   if (inner && inner.top + inner.height < capture.viewportHeight) {
     const footer = capture.viewportHeight - inner.top - inner.height;
-    ctx.drawImage(first, 0, (inner.top + inner.height) * ratio, first.width, footer * ratio,
+    draw(first, 0, (inner.top + inner.height) * ratio, first.width, footer * ratio,
       0, (inner.top + inner.scrollHeight) * ratio, first.width, footer * ratio);
   }
-  return image(canvas.toDataURL('image/png'));
+  return canvases;
 }
 
 function exportCanvas(region: Box): HTMLCanvasElement {
@@ -626,11 +648,22 @@ function download(blob: Blob, filename: string) {
 
 async function savePNG() {
   const region = cropBox();
-  if (region.width * region.height / (scale * scale) > 120_000_000) throw new Error('The PNG is too large. Crop the image before export.');
-  const canvas = exportCanvas(region);
-  const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
-  if (!blob) throw new Error('PNG encoding failed.');
-  download(blob, 'fullpage-screenshot.png');
+  const pixelWidth = Math.ceil(region.width / scale);
+  const pixelHeights = imageSegmentHeights(pixelWidth, Math.ceil(region.height / scale));
+  let y = region.y;
+  for (let index = 0; index < pixelHeights.length; index++) {
+    const height = index === pixelHeights.length - 1 ? region.y + region.height - y : pixelHeights[index] * scale;
+    const canvas = exportCanvas({ x: region.x, y, width: region.width, height });
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('PNG encoding failed.');
+    const suffix = pixelHeights.length > 1 ? `-${index + 1}` : '';
+    download(blob, `fullpage-screenshot${suffix}.png`);
+    y += height;
+    if (pixelHeights.length > 1) {
+      status(`Saving image ${index + 1} of ${pixelHeights.length}…`);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
+  }
 }
 
 async function savePDF() {
@@ -656,10 +689,10 @@ async function load() {
   const error = new URLSearchParams(location.search).get('error');
   if (error) throw new Error(error);
   if (!id) throw new Error('No capture was selected.');
-  const value = await chrome.storage.local.get(`capture:${id}`);
-  record = value[`capture:${id}`] as CaptureRecord;
+  record = (await readCaptureRecord(id))!;
   if (!record || record.id !== id) throw new Error('This capture is no longer available.');
-  baseImage = await assemble(record);
+  baseImages = await assemble(record);
+  await deleteCapture(record.id, record.count);
   await Promise.all([document.fonts.load('400 16px Inter'), document.fonts.load('700 16px Inter')]);
   const downloadIcon = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 1.5v12m0 0 4.5-4.5M10 13.5 5.5 9M2 18h16" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   app.innerHTML = `
@@ -673,10 +706,12 @@ async function load() {
       ] as [Tool, string, string][]).map(([name, label, key]) => toolButton(name, label, key)).join('')}<span class="tool-divider" aria-hidden="true"></span>${toolButton('redact', 'Redact', 'B')}</nav></section>
       <aside class="side-panel properties-panel" aria-label="Properties"><div class="panel-heading"><strong>Properties</strong><button id="collapse-properties" class="panel-toggle" title="Collapse properties" aria-label="Collapse properties">›</button></div><div id="inspector" class="inspector"></div></aside></main>
     <footer><span id="status"></span><div class="footer-actions"><label>PDF size <select id="paper" aria-label="PDF paper size"><option value="a4">A4</option><option value="letter">Letter</option></select></label><button id="retry" title="Capture the source page again">Recapture</button><button id="discard" title="Delete this capture and close the editor">Discard</button></div></footer>`;
-  el<HTMLElement>('#title').textContent = record.title;
+  el<HTMLElement>('#title').textContent = 'Screenshot';
   const available = Math.max(300, window.innerWidth - 560);
-  scale = Math.min(1, available / baseImage.width, 12_000 / baseImage.height);
-  stage = new Konva.Stage({ container: 'canvas', width: Math.ceil(baseImage.width * scale), height: Math.ceil(baseImage.height * scale) });
+  const imageWidth = baseImages[0].width;
+  const imageHeight = baseImages.reduce((total, image) => total + image.height, 0);
+  scale = Math.min(1, available / imageWidth, 12_000 / imageHeight);
+  stage = new Konva.Stage({ container: 'canvas', width: Math.ceil(imageWidth * scale), height: Math.ceil(imageHeight * scale) });
   art = new Konva.Layer(); overlay = new Konva.Layer(); stage.add(art, overlay);
   bindStage(); drawEdits(); selectTool('select');
   updateZoom(true);
@@ -706,11 +741,9 @@ async function load() {
       status(error instanceof Error ? error.message : 'Capture could not start.');
     }
   };
-  el<HTMLButtonElement>('#discard').onclick = async () => {
+  el<HTMLButtonElement>('#discard').onclick = () => {
     if (busy) return;
-    const keys = [`capture:${record.id}`, ...Array.from({ length: record.count }, (_, i) => `tile:${record.id}:${i}`)];
-    try { await chrome.storage.local.remove(keys); window.close(); }
-    catch { status('Could not delete the capture. Please try Discard again.'); }
+    window.close();
   };
   window.addEventListener('keydown', event => {
     if (busy) return;

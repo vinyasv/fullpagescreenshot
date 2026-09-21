@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Fullpage Screenshot",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Capture full pages and edit screenshots locally. Free crop, annotations, PNG and PDF.",
   "minimum_chrome_version": "116",
-  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage"],
+  "permissions": ["activeTab", "scripting"],
   "background": { "service_worker": "src/background.ts", "type": "module" },
   "action": { "default_title": "Capture full page", "default_popup": "progress.html" },
   "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }

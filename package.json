@@ -1,12 +1,12 @@
 {
   "name": "fullpage-screenshot",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/verify-build.mjs",
-    "package": "npm run build && rm -f pagecraft-extension.zip fullpage-screenshot-extension.zip && cd dist && zip -q -r ../fullpage-screenshot-extension.zip .",
+    "package": "npm run build && rm -f fullpage-screenshot-*.zip && cd dist && zip -q -r ../fullpage-screenshot-$npm_package_version.zip .",
     "test": "vitest run"
   },
   "dependencies": {
